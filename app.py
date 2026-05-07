@@ -3,28 +3,29 @@ import requests
 from bs4 import BeautifulSoup
 import datetime
 import pandas as pd
-import time
 import re
+import time
 
-st.set_page_config(page_title="뻘필 분석기 v7.0", layout="wide")
+st.set_page_config(page_title="소속 할당량 체크", layout="wide")
 
-st.title("🕵️ 뻘필 할당량 분석기")
-st.caption("v7.0: 소속 관리 모드 & 띄어쓰기 완벽 지원")
+st.title("🏢 소속 할당량 체크 시스템")
+st.caption("v17.0 | 방장 통합 및 기간 정밀 분석 모드")
 
-# --- 세션 초기화 ---
+# --- 1. 보안 설정 ---
+if 'user_cookie' not in st.session_state:
+    st.session_state['user_cookie'] = ""
+
+with st.sidebar:
+    st.header("🔑 보안")
+    st.session_state['user_cookie'] = st.text_input("인스티즈 Cookie", type="password", value=st.session_state['user_cookie'])
+    st.info("쿠키를 입력해야 분석이 가능합니다.")
+
+# --- 2. 소속 및 명단 설정 ---
 if 'clubs' not in st.session_state:
     st.session_state['clubs'] = [{"name": "", "url": "", "m_list": ""}]
 
-with st.sidebar:
-    st.header("⚙️ 기본 설정")
-    user_cookie = st.text_input("내 인스티즈 Cookie", type="password", value=st.session_state.get('user_cookie', ''))
-    if st.button("설정 저장"):
-        st.session_state['user_cookie'] = user_cookie
-        st.success("저장 완료!")
-
-# --- 소속 설정 ---
-st.subheader("🏢 소속 및 인원 관리")
-num_clubs = st.number_input("관리 중인 소속 개수", 1, 10, value=len(st.session_state['clubs']))
+st.subheader("📋 소속 정보 및 인원 명단")
+num_clubs = st.number_input("관리 소속 개수", 1, 10, value=len(st.session_state['clubs']))
 
 for i in range(num_clubs):
     if i >= len(st.session_state['clubs']):
@@ -32,108 +33,89 @@ for i in range(num_clubs):
     
     col1, col2 = st.columns([1, 2])
     with col1:
-        st.session_state['clubs'][i]['name'] = st.text_input(f"소속 #{i+1} 이름", key=f"n{i}", value=st.session_state['clubs'][i]['name'], placeholder="예: 떡잎마을방범대")
-        st.session_state['clubs'][i]['url'] = st.text_input(f"소속 목록 URL", key=f"u{i}", value=st.session_state['clubs'][i]['url'], placeholder="전체글 보기 주소")
+        st.session_state['clubs'][i]['name'] = st.text_input(f"소속 이름", key=f"n{i}", value=st.session_state['clubs'][i]['name'], placeholder="예: 떡잎마을")
+        st.session_state['clubs'][i]['url'] = st.text_input(f"목록 URL", key=f"u{i}", value=st.session_state['clubs'][i]['url'])
     with col2:
         example_m = "방장: 맹구\n01470: 수지\n만두찌개: 철수"
-        st.session_state['clubs'][i]['m_list'] = st.text_area(f"멤버 명단 (식별값: 이름)", key=f"m{i}", value=st.session_state['clubs'][i]['m_list'], placeholder=example_m, height=120)
+        st.session_state['clubs'][i]['m_list'] = st.text_area(f"인원 명단", key=f"m{i}", value=st.session_state['clubs'][i]['m_list'], placeholder=example_m, height=100)
 
-if st.button("💾 모든 소속 정보 저장"):
-    st.success("브라우저에 소속 정보가 저장되었습니다!")
-
-# --- 분석 실행 ---
+# --- 3. 분석 기간 설정 ---
 st.divider()
-st.subheader("🚀 할당량 체크")
-c1, c2 = st.columns(2)
-with c1:
-    target_date = st.date_input("🗓️ 분석 날짜", datetime.date.today())
-with c2:
-    start_t = st.time_input("⏰ 시작 시간", datetime.time(0, 0))
-    end_t = st.time_input("⏰ 종료 시간", datetime.time(23, 59))
+st.subheader("📅 분석 기간 설정")
+col_s1, col_s2 = st.columns(2)
+with col_s1:
+    s_date = st.date_input("시작 날짜", datetime.date.today() - datetime.timedelta(days=7))
+    s_time = st.time_input("시작 시간", datetime.time(0, 0))
+with col_s2:
+    e_date = st.date_input("종료 날짜", datetime.date.today())
+    e_time = st.time_input("종료 시간", datetime.time(23, 59))
 
-# 소속 선택
-club_options = [c['name'] if c['name'] else f"소속 #{i+1}" for i, c in enumerate(st.session_state['clubs'])]
-sel_name = st.selectbox("분석할 소속 선택", club_options)
-sel_idx = club_options.index(sel_name)
-club = st.session_state['clubs'][sel_idx]
+start_dt = datetime.datetime.combine(s_date, s_time)
+end_dt = datetime.datetime.combine(e_date, e_time)
 
-if st.button("📊 정밀 분석 시작"):
-    start_dt = datetime.datetime.combine(target_date, start_t)
-    end_dt = datetime.datetime.combine(target_date, end_t)
+# --- 4. 분석 엔진 ---
+if st.button("🚀 정밀 분석 시작"):
+    sel_club_name = st.selectbox("분석 대상 소속", [c['name'] for c in st.session_state['clubs']], label_visibility="collapsed")
+    club = next(c for c in st.session_state['clubs'] if c['name'] == sel_club_name)
     
-    st.write(f"### 📡 실시간 분석 로그")
-    
-    try:
-        # 멤버 파싱 (방장: 맹구 형태 및 띄어쓰기 지원)
-        member_map = {}
-        owner_name = "방장"
-        for line in club['m_list'].split('\n'):
-            if ':' in line:
-                c, n = line.split(':', 1)
-                c, n = c.strip(), n.strip()
-                if c == '방장': owner_name = n
-                else: member_map[c] = n
+    with st.status("📡 인스티즈 서버 대조 중...", expanded=True) as status:
+        try:
+            # 명단 파싱 (방장: 맹구 형태를 맹구라는 이름으로 통합)
+            member_map = {}
+            leader_name = "미정"
+            for line in club['m_list'].split('\n'):
+                if ':' in line:
+                    k, v = line.split(':', 1); k, v = k.strip(), v.strip()
+                    if k == "방장": leader_name = v
+                    else: member_map[k] = v
 
-        headers = {"Cookie": st.session_state.get('user_cookie', ''), "User-Agent": "Mozilla/5.0"}
-        res = requests.get(club['url'], headers=headers)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 게시글 번호 추출
-        post_nos = list(dict.fromkeys(re.findall(r'no=(\d+)', res.text)))
-        st.write(f"📍 목록에서 총 {len(post_nos)}개의 글 번호를 찾았습니다.")
-        
-        found_members = set()
-        owner_wrote = False
-        valid_count = 0
-
-        for p_no in post_nos[:20]:
-            p_url = f"https://www.instiz.net/writing/{p_no}"
-            p_res = requests.get(p_url, headers=headers)
+            headers = {"Cookie": st.session_state['user_cookie'], "User-Agent": "Mozilla/5.0"}
+            res = requests.get(club['url'], headers=headers)
             
-            # 날짜 정밀 수색 (본문 전체에서 정규식으로 찾기)
-            # 2025/10/15 21:42:50 또는 2025.10.15 21:42 등 모든 형태 대응
-            date_match = re.search(r'(\d{4}[./]\d{2}[./]\d{2} \d{2}:\d{2}(?::\d{2})?)', p_res.text)
+            # 목록에서 글 번호 싹 긁어오기
+            post_nos = list(dict.fromkeys(re.findall(r'(?:no=|writing/)(\d+)', res.text)))
+            st.write(f"📍 목록에서 총 {len(post_nos)}개의 글을 발견했습니다.")
             
-            if not date_match:
-                st.write(f"❓ {p_no}번 글: 날짜 형식을 찾을 수 없음")
-                continue
-                
-            date_str = date_match.group(1).replace('/', '.') # 형식을 점(.)으로 통일
-            try:
-                # 초 단위가 있으면 포함해서 해석, 없으면 분까지만 해석
-                fmt = "%Y.%m.%d %H:%M:%S" if date_str.count(':') == 2 else "%Y.%m.%d %H:%M"
-                p_dt = datetime.datetime.strptime(date_str, fmt)
-            except:
-                st.write(f"❌ {p_no}번 글: 날짜 해석 실패 ({date_str})")
-                continue
+            check_results = {leader_name: False}
+            for name in member_map.values(): check_results[name] = False
 
-            if start_dt <= p_dt <= end_dt:
-                valid_count += 1
-                st.write(f"✅ **적중!** {p_no}번 글 ({date_str})")
+            for p_no in post_nos[:30]: # 최신 30개 분석
+                p_url = f"https://www.instiz.net/writing/{p_no}"
+                p_res = requests.get(p_url, headers=headers)
                 
-                if_url = f"https://www.instiz.net/iframe_writing.htm?id=writing&no={p_no}"
-                if_res = requests.get(if_url, headers=headers)
+                # 날짜 추출 (슬래시 대응)
+                dt_match = re.search(r'(\d{4}[./]\d{2}[./]\d{2} \d{2}:\d{2}(?::\d{2})?)', p_res.text)
+                if not dt_match: continue
                 
-                matched = False
-                for code, name in member_map.items():
-                    if code in if_res.text:
-                        found_members.add(code)
-                        matched = True
-                        st.write(f"   ㄴ 작성자: {name}({code})")
-                        break
-                if not matched:
-                    owner_wrote = True
-                    st.write(f"   ㄴ 작성자: {owner_name}(방장)")
-            else:
-                st.write(f"⚪ {p_no}번 글 ({date_str}): 범위 밖")
+                raw_dt = dt_match.group(1).replace('/', '.')
+                fmt = "%Y.%m.%d %H:%M:%S" if raw_dt.count(':') == 2 else "%Y.%m.%d %H:%M"
+                p_dt = datetime.datetime.strptime(raw_dt, fmt)
 
-        # 결과
-        st.divider()
-        res_list = [{"이름": f"{owner_name}(방장)", "상태": "✅ 완료" if owner_wrote else "❌ 미작성"}]
-        for c, n in member_map.items():
-            res_list.append({"이름": n, "상태": "✅ 완료" if c in found_members else "❌ 미작성"})
-        st.table(pd.DataFrame(res_list))
-        st.success(f"분석 완료! 범위 내 글 {valid_count}개 발견")
+                if start_dt <= p_dt <= end_dt:
+                    if_url = f"https://www.instiz.net/iframe_writing.htm?id=writing&no={p_no}"
+                    if_res = requests.get(if_url, headers=headers)
+                    combined = p_res.text + if_res.text
+                    
+                    matched = False
+                    for code, name in member_map.items():
+                        if code in combined or f">{name}<" in combined:
+                            check_results[name] = True
+                            matched = True
+                            break
+                    if not matched: check_results[leader_name] = True
 
-    except Exception as e:
-        st.error(f"🚨 에러: {e}")
+            status.update(label="분석 완료!", state="complete")
+            
+            # 최종 결과 표 (깔끔하게 이름만!)
+            st.subheader(f"📊 {start_dt.strftime('%m/%d')} ~ {end_dt.strftime('%m/%d')} 결과")
+            final_df = pd.DataFrame([{"이름": n, "상태": "✅ 완료" if ok else "❌ 미작성"} for n, ok in check_results.items()])
+            st.table(final_df)
+            
+            # 카톡 공유용
+            summary = f"[{start_dt.strftime('%m/%d')}~{end_dt.strftime('%m/%d')} 현황]\n"
+            for n, ok in check_results.items():
+                summary += f"- {n}: {'✅ 완료' if ok else '❌ 미작성'}\n"
+            st.text_area("📋 카톡 공지용 복사", summary, height=150)
+
+        except Exception as e:
+            st.error(f"오류: {e}")

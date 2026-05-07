@@ -6,10 +6,10 @@ import pandas as pd
 import time
 import re
 
-st.set_page_config(page_title="뻘필 분석기 v5.0", layout="wide")
+st.set_page_config(page_title="뻘필 분석기 v6.0", layout="wide")
 
-st.title("🕵️ 뻘필 분석기 (현장 생중계 버전)")
-st.info("분석 버튼을 누른 후, 아래 '분석 로그'에 뜨는 내용을 유심히 봐주세요!")
+st.title("🕵️ 뻘필 분석기 (날짜 형식 수정본)")
+st.info("💡 인스티즈의 'YYYY/MM/DD HH:MM:SS' 형식을 지원하도록 업데이트되었습니다.")
 
 # --- 세션 초기화 ---
 if 'clubs' not in st.session_state:
@@ -44,7 +44,12 @@ with c2:
     end_t = st.time_input("⏰ 종료 시간", datetime.time(23, 59))
 
 if st.button("🚀 분석 및 생중계 시작"):
-    club = st.session_state['clubs'][st.selectbox("대상", range(num_clubs), format_func=lambda x: st.session_state['clubs'][x]['name'], label_visibility="collapsed")]
+    # 선택된 동아리 정보 가져오기
+    club_options = [c['name'] if c['name'] else f"동아리 #{i+1}" for i, c in enumerate(st.session_state['clubs'])]
+    sel_name = st.selectbox("대상 선택", club_options, label_visibility="collapsed")
+    sel_idx = club_options.index(sel_name)
+    club = st.session_state['clubs'][sel_idx]
+    
     start_dt = datetime.datetime.combine(target_date, start_t)
     end_dt = datetime.datetime.combine(target_date, end_t)
     
@@ -64,7 +69,7 @@ if st.button("🚀 분석 및 생중계 시작"):
         res = requests.get(club['url'], headers=headers)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 1. 모든 게시글 번호 추출
+        # 게시글 번호 추출
         all_links = [l['href'] for l in soup.find_all('a', href=True) if 'no=' in l['href']]
         post_nos = list(dict.fromkeys([re.findall(r'no=(\d+)', l)[0] for l in all_links if re.findall(r'no=(\d+)', l)]))
         
@@ -74,23 +79,28 @@ if st.button("🚀 분석 및 생중계 시작"):
         owner_wrote = False
         valid_count = 0
 
-        for p_no in post_nos[:15]: # 상위 15개만 정밀 분석
+        for p_no in post_nos[:20]: # 최신 20개 분석
             p_url = f"https://www.instiz.net/writing/{p_no}"
             p_res = requests.get(p_url, headers=headers)
             p_soup = BeautifulSoup(p_res.text, 'html.parser')
             
-            # 날짜 텍스트 추출 시도
-            raw_date = p_soup.find(string=re.compile(r'\d{2,4}\.\d{1,2}\.\d{1,2} \d{1,2}:\d{1,2}'))
+            # 슬래시(/) 형식을 포함한 날짜 정규식으로 수정
+            raw_date = p_soup.find(string=re.compile(r'\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}'))
             if not raw_date:
-                st.write(f"❓ {p_no}번 글: 날짜를 찾을 수 없음")
+                # 슬래시가 없을 경우 기존 점(.) 형식도 시도
+                raw_date = p_soup.find(string=re.compile(r'\d{4}\.\d{2}\.\d{2} \d{2}:\d{2}'))
+            
+            if not raw_date:
+                st.write(f"❓ {p_no}번 글: 날짜 형식을 찾을 수 없음")
                 continue
                 
             date_str = raw_date.strip()
-            # 2025.1.1 -> 2025.01.01 형태 보정 (필요시)
             try:
-                # 다양한 날짜 형식 지원 (25.10.15 vs 2025.10.15)
-                fmt = "%Y.%m.%d %H:%M" if len(date_str.split('.')[0]) == 4 else "%y.%m.%d %H:%M"
-                p_dt = datetime.datetime.strptime(date_str, fmt)
+                # 슬래시와 초 단위 대응
+                if '/' in date_str:
+                    p_dt = datetime.datetime.strptime(date_str, "%Y/%m/%d %H:%M:%S")
+                else:
+                    p_dt = datetime.datetime.strptime(date_str, "%Y.%m.%d %H:%M")
             except:
                 st.write(f"❌ {p_no}번 글: 날짜 해석 실패 ({date_str})")
                 continue
@@ -100,7 +110,7 @@ if st.button("🚀 분석 및 생중계 시작"):
                 valid_count += 1
                 st.write(f"✅ **적중!** {p_no}번 글 ({date_str}) - 분석 중...")
                 
-                # 식별값 확인
+                # 식별값 확인 (iframe 내 multiwriter 체크)
                 if_url = f"https://www.instiz.net/iframe_writing.htm?id=writing&no={p_no}"
                 if_res = requests.get(if_url, headers=headers)
                 

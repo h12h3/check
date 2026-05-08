@@ -5,127 +5,136 @@ import datetime
 import pandas as pd
 import re
 import time
+import json
+import os
+import concurrent.futures
 
-st.set_page_config(page_title="소속 할당량 정밀 체크", layout="wide")
+st.set_page_config(page_title="오로트 소속 관리 시스템", layout="wide")
 
-st.title("📊 소속 할당량 최종 분석기")
-st.caption("v23.0 | 맹구 통합 및 수지 지문 정밀 추적 (주간/기간 체크 지원)")
+# --- 1. 데이터 저장 및 로드 로직 ---
+def get_db_path(room_id):
+    return f"room_{room_id}.json"
 
-# --- 1. 보안 설정 ---
-if 'user_cookie' not in st.session_state:
-    st.session_state['user_cookie'] = ""
+def load_room_data(room_id):
+    path = get_db_path(room_id)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"members": [], "filters": "카데판, 게임판, 산책판"}
 
+def save_room_data(room_id, data):
+    path = get_db_path(room_id)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+# --- 2. 사이드바: 접속 및 로그인 ---
 with st.sidebar:
-    st.header("🔑 보안")
-    st.session_state['user_cookie'] = st.text_input("인스티즈 Cookie", type="password", value=st.session_state['user_cookie'])
-    st.info("로그인 쿠키를 입력해야 수지님의 숨겨진 지문을 찾을 수 있습니다.")
-
-# --- 2. 소속 및 인원 설정 ---
-if 'clubs' not in st.session_state:
-    st.session_state['clubs'] = [{"name": "", "url": "", "m_list": ""}]
-
-st.subheader("📋 소속 및 명단 관리")
-num_clubs = st.number_input("관리 소속 개수", 1, 5, value=len(st.session_state['clubs']))
-
-for i in range(num_clubs):
-    if i >= len(st.session_state['clubs']):
-        st.session_state['clubs'].append({"name": "", "url": "", "m_list": ""})
+    st.header("🔐 시크릿 룸 접속")
+    room_id = st.text_input("소속 코드 (Room ID)", type="password", help="데이터를 저장하고 불러올 열쇠입니다.")
+    user_cookie = st.text_input("인스티즈 Cookie", type="password", help="서버에 저장되지 않으며 세션 종료 시 휘발됩니다.")
     
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.session_state['clubs'][i]['name'] = st.text_input(f"소속 이름", key=f"n{i}", value=st.session_state['clubs'][i]['name'], placeholder="예: 떡잎마을")
-        st.session_state['clubs'][i]['url'] = st.text_input(f"전체글 보기 URL", key=f"u{i}", value=st.session_state['clubs'][i]['url'])
-    with col2:
-        example_m = "방장: 맹구\n01470: 수지\n만두찌개: 철수"
-        st.session_state['clubs'][i]['m_list'] = st.text_area(f"명단 (방장: 이름 / 식별값: 이름)", key=f"m{i}", value=st.session_state['clubs'][i]['m_list'], placeholder=example_m, height=100)
-
-# --- 3. 분석 기간 설정 (자유 범위) ---
-st.divider()
-st.subheader("📅 분석 기간 설정")
-col_s1, col_s2 = st.columns(2)
-with col_s1:
-    s_date = st.date_input("날짜 체크 시작일", datetime.date.today() - datetime.timedelta(days=7))
-    s_time = st.time_input("시작 시간", datetime.time(0, 0))
-with col_s2:
-    e_date = st.date_input("날짜 체크 종료일", datetime.date.today())
-    e_time = st.time_input("종료 시간", datetime.time(23, 59))
-
-start_dt = datetime.datetime.combine(s_date, s_time)
-end_dt = datetime.datetime.combine(e_date, e_time)
-
-# --- 4. 분석 엔진 ---
-if st.button("🚀 정밀 할당량 분석 시작"):
-    club = st.session_state['clubs'][0]
-    
-    if not st.session_state['user_cookie']:
-        st.error("쿠키를 먼저 입력해주세요!")
+    if room_id:
+        if 'current_room' not in st.session_state or st.session_state['current_room'] != room_id:
+            st.session_state['room_data'] = load_room_data(room_id)
+            st.session_state['current_room'] = room_id
+        st.success(f"'{room_id}' 방 접속 중")
     else:
-        with st.status("📡 인스티즈 서버 데이터 대조 중...", expanded=True) as status:
-            try:
-                # 명단 파싱
-                member_map = {}
-                leader_name = "미정"
-                for line in club['m_list'].split('\n'):
-                    if ':' in line:
-                        k, v = line.split(':', 1); k, v = k.strip(), v.strip()
-                        if k == "방장": leader_name = v
-                        else: member_map[k] = v
+        st.warning("소속 코드를 입력해주세요.")
 
-                headers = {"Cookie": st.session_state['user_cookie'], "User-Agent": "Mozilla/5.0"}
-                res = requests.get(club['url'], headers=headers)
-                
-                # 목록에서 모든 글 번호 추출 (정밀 수색)
-                post_nos = list(dict.fromkeys(re.findall(r'(?:no=|writing/)(\d+)', res.text)))
-                st.write(f"📍 목록에서 총 {len(post_nos)}개의 글을 발견했습니다.")
-                
-                # 결과 저장용 (중복 제거)
-                check_results = {leader_name: False}
-                for name in member_map.values():
-                    check_results[name] = False
+# --- 3. 메인 화면: 멤버 및 필터 설정 ---
+st.title("🛡️ 오로트(Orot) 할당량 관리 시스템")
 
-                for p_no in post_nos[:30]:
-                    p_url = f"https://www.instiz.net/writing/{p_no}"
-                    p_res = requests.get(p_url, headers=headers)
-                    
-                    # 정밀 날짜 추출 (2025/10/15 21:42:50 등 모든 형태 대응)
-                    dt_match = re.search(r'(\d{4}[./]\d{2}[./]\d{2} \d{2}:\d{2}(?::\d{2})?)', p_res.text)
-                    if not dt_match: continue
-                    
-                    raw_dt = dt_match.group(1).replace('/', '.')
-                    fmt = "%Y.%m.%d %H:%M:%S" if raw_dt.count(':') == 2 else "%Y.%m.%d %H:%M"
-                    p_dt = datetime.datetime.strptime(raw_dt, fmt)
+if 'room_data' in st.session_state:
+    with st.expander("⚙️ 멤버 및 필터링 설정", expanded=not st.session_state['room_data']['members']):
+        st.subheader("🚫 제외 키워드 설정")
+        st.session_state['room_data']['filters'] = st.text_area("제목에 포함되면 제외할 키워드 (쉼표 구분)", value=st.session_state['room_data']['filters'])
+        
+        st.divider()
+        st.subheader("👤 멤버 추가/삭제")
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c1: new_name = st.text_input("이름", key="new_name")
+        with c2: new_url = st.text_input("신알신 링크 (방장은 '방장' 입력)", key="new_url")
+        with c3: 
+            st.write("")
+            if st.button("추가", use_container_width=True):
+                if new_name and new_url:
+                    st.session_state['room_data']['members'].append({"이름": new_name, "링크": new_url})
+                    save_room_data(room_id, st.session_state['room_data'])
+                    st.rerun()
 
-                    # 지정한 기간 내의 글인지 확인
-                    if start_dt <= p_dt <= end_dt:
-                        # 수지님 지문이 숨어있는 iframe 영역까지 긁기
-                        if_url = f"https://www.instiz.net/iframe_writing.htm?id=writing&no={p_no}"
-                        if_res = requests.get(if_url, headers=headers)
-                        combined_src = p_res.text + if_res.text
-                        
-                        matched = False
-                        for code, name in member_map.items():
-                            # 신알신 버튼이나 관리자 도구에 숨겨진 '번호'를 정밀 수색
-                            if f"={code}" in combined_src or f"'{code}'" in combined_src or f'"{code}"' in combined_src:
-                                check_results[name] = True
-                                matched = True
-                                break
-                        
-                        # 기간 내 글인데 멤버 지문이 없다면? -> 방장(맹구) 글로 자동 판독!
-                        if not matched and leader_name != "미정":
-                            check_results[leader_name] = True
+        if st.session_state['room_data']['members']:
+            m_df = pd.DataFrame(st.session_state['room_data']['members'])
+            st.table(m_df)
+            del_idx = st.number_input("삭제할 행 번호", 0, len(st.session_state['room_data']['members'])-1, step=1)
+            if st.button("🗑️ 선택 멤버 삭제", type="primary"):
+                st.session_state['room_data']['members'].pop(del_idx)
+                save_room_data(room_id, st.session_state['room_data'])
+                st.rerun()
 
-                status.update(label="분석 완료!", state="complete")
+    # --- 4. 분석 실행 섹션 ---
+    st.divider()
+    col_run1, col_run2 = st.columns([2, 1])
+    with col_run1:
+        club_url = st.text_input("필명 전체글 보기 URL")
+    with col_run2:
+        target_date = st.date_input("체크 날짜", datetime.date.today())
+
+    # 분석 엔진
+    def check_member_logic(member, club_url, cookie, filters):
+        name = member['이름']
+        p_no_match = re.search(r'(?:no=|writing/)(\d+)', member['링크'])
+        if not p_no_match: return name, False
+        
+        p_no = p_no_match.group(1)
+        headers = {"Cookie": cookie, "User-Agent": "Mozilla/5.0"}
+        
+        # 신청 (Toggle ON)
+        requests.get(f"https://www.instiz.net/bbs/alarm_post.php?id=writing&no={p_no}", headers=headers, timeout=5)
+        time.sleep(0.5)
+        
+        has_done = False
+        try:
+            res = requests.get(club_url, headers=headers, timeout=5)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            filter_list = [f.strip() for f in filters.split(',')]
+            
+            for row in soup.select('tr, li, div'):
+                text = row.get_text()
+                if "알림 취소" in text:
+                    # 필터링 대조
+                    if not any(f in text for f in filter_list if f):
+                        has_done = True
+                        break
+        except: pass
+        
+        # 해제 (Toggle OFF)
+        requests.get(f"https://www.instiz.net/bbs/alarm_post.php?id=writing&no={p_no}", headers=headers, timeout=5)
+        return name, has_done
+
+    if st.button("🚀 30인 병렬 필터링 분석 시작", use_container_width=True):
+        if not user_cookie or not club_url:
+            st.error("사이드바에 쿠키를 입력하고 목록 URL을 확인해주세요.")
+        else:
+            with st.status("⚡ 라이트닝 엔진 가동 중... (약 20초 소요)", expanded=True):
+                members_only = [m for m in st.session_state['room_data']['members'] if "방장" not in m['링크']]
+                leader_name = next((m['이름'] for m in st.session_state['room_data']['members'] if "방장" in m['링크']), "맹구")
                 
-                # --- 결과 출력 ---
-                st.subheader(f"📊 할당량 현황 ({start_dt.strftime('%m/%d')} ~ {end_dt.strftime('%m/%d')})")
-                final_df = pd.DataFrame([{"이름": n, "상태": "✅ 완료" if ok else "❌ 미작성"} for n, ok in check_results.items() if n != "미정"])
-                st.table(final_df)
+                results = {m['이름']: False for m in st.session_state['room_data']['members']}
                 
-                summary = f"[{start_dt.strftime('%m/%d')}~{end_dt.strftime('%m/%d')} 현황]\n"
-                for n, ok in check_results.items():
-                    if n != "미정":
-                        summary += f"- {n}: {'✅ 완료' if ok else '❌ 미작성'}\n"
+                with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+                    futures = {executor.submit(check_member_logic, m, club_url, user_cookie, st.session_state['room_data']['filters']): m for m in members_only}
+                    for future in concurrent.futures.as_completed(futures):
+                        name, ok = future.result()
+                        results[name] = ok
+
+                # 결과 요약
+                st.subheader(f"📊 {target_date} 할당량 현황")
+                res_df = pd.DataFrame([{"이름": n, "상태": "✅ 완료" if ok else "❌ 미작성"} for n, ok in results.items()])
+                st.table(res_df)
+                
+                summary = f"[{target_date.strftime('%m/%d')} 현황]\n"
+                for n, ok in results.items():
+                    summary += f"- {n}: {'✅ 완료' if ok else '❌ 미작성'}\n"
                 st.text_area("📋 카톡 공지용 복사", summary, height=150)
-
-            except Exception as e:
-                st.error(f"분석 중 오류 발생: {e}")
+else:
+    st.info("👈 사이드바에서 소속 코드(Room ID)를 입력하여 접속해주세요.")
